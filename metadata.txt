@@ -1,0 +1,19 @@
+[general]
+name=SDI Publisher
+qgisMinimumVersion=3.16
+description=Publish QGIS project layers to a PostGIS/GeoServer/GeoNode spatial data infrastructure: upload to PostGIS, publish to GeoServer, and register in GeoNode.
+about=Publish the layers of your QGIS project across a full spatial data infrastructure. Upload to a PostgreSQL/PostGIS database (configurable geometry column, primary key, SRID and spatial index), publish the resulting tables to GeoServer with multilingual metadata, and register them in GeoNode. Credentials are stored encrypted in the QGIS Authentication Manager, never in plain text.
+version=0.1.0
+author=Josep Quevedo & Pau Morell — Natural Hazards and Emergencies Observatory, Balearic Islands
+email=
+
+tracker=https://github.com/pepquemen/sdi-publisher/issues
+repository=https://github.com/pepquemen/sdi-publisher
+homepage=https://github.com/pepquemen/sdi-publisher
+
+tags=postgis,postgresql,upload,database,gis,vector,etl,schema,geoserver,geonode,sdi,idee
+
+category=Database
+icon=assets/icons/icon.png
+experimental=True
+deprecated=False

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Packaging
+*.zip
+build/
+dist/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local data / secrets (never commit)
+.env
+*.qgs~
+*.gpkg
