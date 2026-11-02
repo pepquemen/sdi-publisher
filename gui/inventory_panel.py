@@ -27,11 +27,13 @@ from qgis.PyQt.QtWidgets import (
 from qgis.core import QgsApplication, QgsTask
 
 from ..core import ide_inventory as inv
+from ..core.raster_tools import RasterConfig
 from .icons import themed_icon
 from .styles import BRAND, SUCCESS, WARNING, DANGER
 
 MODE_PG = "pg"
 MODE_GS = "gs"
+MODE_RS = "rs"
 
 GREY = "#8a8f98"
 STATUS_COLORS = {
@@ -45,6 +47,12 @@ STATUS_COLORS = {
     inv.GS_DISABLED: WARNING,
     inv.GS_SQL_VIEW: GREY,
     inv.GS_EXTERNAL: GREY,
+    inv.RS_OK: SUCCESS,
+    inv.RS_NOT_PUBLISHED: GREY,
+    inv.RS_MODIFIED: WARNING,
+    inv.RS_MISSING_ORIGINAL: DANGER,
+    inv.RS_MISSING_GS: DANGER,
+    inv.RS_NOT_CATALOGUED: WARNING,
 }
 
 FILTER_ALL = "All statuses"
@@ -56,6 +64,9 @@ PG_COLUMNS = [("Name", 0), ("Table", 100), ("Geometry", 95), ("Rows", 55),
               ("GeoServer layer", 135), ("Status", 150)]
 GS_COLUMNS = [("Name", 0), ("Layer", 120), ("Source", 145), ("GeoNode", 76),
               ("Status", 160)]
+
+RS_COLUMNS = [("Name", 0), ("Layer", 130), ("Original", 70), ("Catalog", 70),
+              ("GeoServer", 80), ("Status", 160)]
 
 CHIP_LABELS = {inv.GS_ORPHAN: "Orphan", inv.PG_UNCHECKED: "Not checked"}
 
@@ -105,6 +116,7 @@ class _InventoryTask(QgsTask):
             self.data = inv.build_ide_inventory(
                 self.pg_conn, self.gs_conn, self.gn_conn,
                 progress=self.setProgress, canceled=self.isCanceled,
+                raster_cfg=RasterConfig.load(),
             )
             return True
         except inv.InventoryCanceled:
@@ -134,7 +146,7 @@ class InventoryPanel(QWidget):
         self._task = None
         self._stale = False
         self._mode = MODE_PG
-        self._collapsed = {MODE_PG: set(), MODE_GS: set()}
+        self._collapsed = {MODE_PG: set(), MODE_GS: set(), MODE_RS: set()}
 
         self._build_header()
         self._build_ui()
@@ -183,7 +195,9 @@ class InventoryPanel(QWidget):
         self.pg_mode_btn = QPushButton("  Postgres by schema")
         self.gs_mode_btn = QPushButton("  GeoServer by workspace")
         self._mode_group = QButtonGroup(self)
-        for btn, mode in ((self.pg_mode_btn, MODE_PG), (self.gs_mode_btn, MODE_GS)):
+        self.rs_mode_btn = QPushButton("  Rasters")
+        for btn, mode in ((self.pg_mode_btn, MODE_PG), (self.gs_mode_btn, MODE_GS),
+                          (self.rs_mode_btn, MODE_RS)):
             btn.setCheckable(True)
             btn.setStyleSheet(SEGMENT_QSS)
             btn.setProperty("mode", mode)
@@ -191,6 +205,8 @@ class InventoryPanel(QWidget):
             bar.addWidget(btn)
         self.pg_mode_btn.setIcon(themed_icon("nav_upload.svg"))
         self.gs_mode_btn.setIcon(themed_icon("nav_geoserver.svg"))
+        self.rs_mode_btn.setIcon(themed_icon("nav_raster.svg"))
+        self.rs_mode_btn.setToolTip("Original repository ↔ PostGIS catalog ↔ GeoServer")
         self.pg_mode_btn.setChecked(True)
         bar.addSpacing(12)
         bar.addStretch()
@@ -300,6 +316,13 @@ class InventoryPanel(QWidget):
     def _has_any_connection(self):
         return any((self.pg_connection, self.gs_connection, self.geonode_connection))
 
+    def _mode_statuses(self):
+        return {MODE_PG: inv.PG_STATUSES, MODE_GS: inv.GS_STATUSES,
+                MODE_RS: inv.RS_STATUSES}[self._mode]
+
+    def _noun(self):
+        return {MODE_PG: "tables", MODE_GS: "layers", MODE_RS: "rasters"}[self._mode]
+
     # ----------------------------------------------------------- reading
     def refresh(self):
         if self._task is not None:
@@ -377,15 +400,16 @@ class InventoryPanel(QWidget):
         self._render()
 
     def _update_filter_options(self):
-        statuses = inv.PG_STATUSES if self._mode == MODE_PG else inv.GS_STATUSES
+        statuses = self._mode_statuses()
         self.status_combo.blockSignals(True)
         self.status_combo.clear()
         self.status_combo.addItem(FILTER_ALL)
         for s in statuses:
             self.status_combo.addItem(s)
-        self.status_combo.addItem(FILTER_RENAMED)
+        if self._mode != MODE_RS:
+            self.status_combo.addItem(FILTER_RENAMED)
         self.status_combo.blockSignals(False)
-        cols = PG_COLUMNS if self._mode == MODE_PG else GS_COLUMNS
+        cols = {MODE_PG: PG_COLUMNS, MODE_GS: GS_COLUMNS, MODE_RS: RS_COLUMNS}[self._mode]
         self.tree.clear()
         self.tree.setColumnCount(len(cols))
         self.tree.setHeaderLabels([c[0] for c in cols])
@@ -405,6 +429,8 @@ class InventoryPanel(QWidget):
             return None
         if self._mode == MODE_PG:
             return self._data["pg"]
+        if self._mode == MODE_RS:
+            return self._data.get("rasters")
         gs = self._data["gs"]
         if gs is None:
             return None
@@ -412,6 +438,7 @@ class InventoryPanel(QWidget):
 
     def _group_key(self, row):
         return row["schema"] if self._mode == MODE_PG else row["workspace"]
+
 
     def _matches(self, row):
         wanted = self.status_combo.currentText()
@@ -426,6 +453,8 @@ class InventoryPanel(QWidget):
         if self._mode == MODE_PG:
             hay = [row["table"], row["schema"], row["comment"] or ""]
             hay += [f"{p['workspace']}:{p['layer']}" for p in row["publications"]]
+        elif self._mode == MODE_RS:
+            hay = [row["layer"], row["workspace"], row["title"] or "", row["source"] or ""]
         else:
             hay = [row["layer"], row["workspace"], row["native_name"],
                    row["title"] or "", row["pg_comment"] or "", row["datastore"]]
@@ -448,6 +477,8 @@ class InventoryPanel(QWidget):
         if self._mode == MODE_PG:
             for r in rows:
                 groups.setdefault(r["schema"], [])
+        elif self._mode == MODE_RS:
+            pass
         else:
             for ws in self._data.get("gs_workspaces") or []:
                 groups.setdefault(ws, [])
@@ -464,8 +495,7 @@ class InventoryPanel(QWidget):
             if filtering and not children:
                 continue
             total = sum(1 for r in rows if self._group_key(r) == name)
-            noun = "tables" if self._mode == MODE_PG else "layers"
-            label = f"{name}   ·   {total} {noun}"
+            label = f"{name}   ·   {total} {self._noun()}"
             problems = self._group_problems(name, rows)
             if problems:
                 label += f"   ·   {problems}"
@@ -482,13 +512,19 @@ class InventoryPanel(QWidget):
             group.setExpanded(expand)
 
         total = len(rows)
-        noun = "tables" if self._mode == MODE_PG else "layers"
+        noun = self._noun()
         self.footer_label.setText(
             f"{shown} of {total} {noun} shown" if filtering else f"{total} {noun}"
         )
 
     def _group_problems(self, name, rows):
         mine = [r for r in rows if self._group_key(r) == name]
+        if self._mode == MODE_RS:
+            counts = {}
+            for r in mine:
+                if r["status"] not in (inv.RS_OK, inv.RS_NOT_PUBLISHED):
+                    counts[r["status"]] = counts.get(r["status"], 0) + 1
+            return " · ".join(f"{n} {s[0].lower() + s[1:]}" for s, n in counts.items())
         if self._mode == MODE_PG:
             missing = sum(1 for r in mine if r["status"] == inv.PG_NOT_IN_GEOSERVER)
             no_gn = sum(1 for r in mine if r["status"] == inv.PG_NOT_IN_GEONODE)
@@ -509,6 +545,8 @@ class InventoryPanel(QWidget):
 
     def _make_item(self, r):
         checked_gn = bool(self._data and self._data.get("geonode_checked"))
+        if self._mode == MODE_RS:
+            return self._make_raster_item(r)
         if self._mode == MODE_PG:
             pubs = r["publications"]
             gs_text = ", ".join(f"{p['workspace']}:{p['layer']}" for p in pubs) or "—"
@@ -577,6 +615,35 @@ class InventoryPanel(QWidget):
             item.setTextAlignment(3, Qt.AlignCenter)
         return item
 
+    def _make_raster_item(self, r):
+        orig = "✎" if r["modified"] else _tick(r["in_repo"])
+        values = [r["title"] or r["layer"], r["layer"], orig,
+                  _tick(r["in_catalog"]), _tick(r["in_geoserver"]), r["status"]]
+        tip = []
+        if r["workspace"] != inv.NOT_PUBLISHED_GROUP:
+            tip.append(f"{r['workspace']}:{r['layer']}")
+        if r["source"]:
+            tip.append(f"Original: {r['source']}")
+        if r["version"]:
+            tip.append(f"Catalog: v{r['version']} · {r['published'] or ''} · {r['user'] or ''}")
+        if r["status"] == inv.RS_MODIFIED:
+            tip.append("The original file changed after it was published — republish it.")
+        if r["status"] == inv.RS_NOT_CATALOGUED:
+            tip.append("Published in GeoServer but not registered in the PostGIS catalog.")
+        if r["status"] == inv.RS_MISSING_GS:
+            tip.append("Registered in the catalog but GeoServer doesn't publish it.")
+        if r["status"] == inv.RS_MISSING_ORIGINAL:
+            tip.append("The original file recorded in the catalog no longer exists.")
+        item = QTreeWidgetItem([str(v) for v in values])
+        item.setData(0, Qt.UserRole, ("row", r))
+        for c in range(len(values)):
+            item.setToolTip(c, "\n".join(tip))
+        for c in (2, 3, 4):
+            item.setTextAlignment(c, Qt.AlignCenter)
+        item.setText(5, f"● {r['status']}")
+        item.setForeground(5, QBrush(QColor(STATUS_COLORS.get(r["status"], GREY))))
+        return item
+
     def _empty_message(self):
         if self._task is not None:
             return "Reading…"
@@ -584,6 +651,12 @@ class InventoryPanel(QWidget):
             return "Connect to Postgres and/or GeoServer on the Connection page, then press Refresh."
         if self._data is None:
             return "Press Refresh to read the inventory."
+        if self._mode == MODE_RS:
+            cfg = RasterConfig.load()
+            return ("No raster source could be read. Set the original repository folder "
+                    "and catalog schema on the Rasters page, connect GeoServer/Postgres "
+                    "and refresh." if not (cfg.repo_dir or cfg.catalog_schema)
+                    else "No rasters found (see any error below).")
         if self._mode == MODE_PG:
             return ("Postgres was not read — connect to Postgres and refresh."
                     if self.pg_connection is None else "Postgres could not be read (see the error below).")
@@ -601,7 +674,7 @@ class InventoryPanel(QWidget):
                 w.deleteLater()
         if not rows:
             return
-        statuses = inv.PG_STATUSES if self._mode == MODE_PG else inv.GS_STATUSES
+        statuses = self._mode_statuses()
         total_btn = self._chip(f"{len(rows)}  total", FILTER_ALL, BRAND)
         self._chips_row.addWidget(total_btn)
         for s in statuses:
@@ -662,6 +735,12 @@ class InventoryPanel(QWidget):
                 for p in r["publications"]:
                     alt = f"{p['workspace']}:{p['layer']}"
                     menu.addAction(f"Copy {alt}", lambda a=alt: self._copy(a))
+            elif self._mode == MODE_RS:
+                if r["workspace"] != inv.NOT_PUBLISHED_GROUP:
+                    alt = f"{r['workspace']}:{r['layer']}"
+                    menu.addAction(f"Copy {alt}", lambda: self._copy(alt))
+                if r["source"]:
+                    menu.addAction("Copy original path", lambda: self._copy(r["source"]))
             else:
                 alt = f"{r['workspace']}:{r['layer']}"
                 menu.addAction(f"Copy {alt}", lambda: self._copy(alt))
@@ -683,7 +762,8 @@ class InventoryPanel(QWidget):
         if not rows:
             QMessageBox.information(self, "Export", "Nothing to export — refresh first or relax the filters.")
             return
-        default = "inventory_postgres.csv" if self._mode == MODE_PG else "inventory_geoserver.csv"
+        default = {MODE_PG: "inventory_postgres.csv", MODE_GS: "inventory_geoserver.csv",
+                   MODE_RS: "inventory_rasters.csv"}[self._mode]
         path, _ = QFileDialog.getSaveFileName(self, "Export inventory", default, "CSV (*.csv)")
         if not path:
             return
@@ -697,6 +777,17 @@ class InventoryPanel(QWidget):
                         r["geom_types"], r["srid"] or "", r["kind"],
                         "" if r["approx_rows"] is None else r["approx_rows"],
                         " ".join(f"{p['workspace']}:{p['layer']}" for p in pubs), gn, r["status"]]
+        elif self._mode == MODE_RS:
+            header = ["workspace", "layer", "title", "original", "in_repository",
+                      "original_modified", "in_catalog", "catalog_version", "published",
+                      "in_geoserver", "status"]
+            def fmt(v):
+                return "" if v is None else v
+            def line(r):
+                return [r["workspace"], r["layer"], r["title"] or "", r["source"] or "",
+                        fmt(r["in_repo"]), r["modified"], fmt(r["in_catalog"]),
+                        fmt(r["version"]), fmt(r["published"]), fmt(r["in_geoserver"]),
+                        r["status"]]
         else:
             header = ["workspace", "datastore", "layer", "title", "store_type", "schema",
                       "native_name", "table_exists", "in_geonode", "status", "table_comment"]

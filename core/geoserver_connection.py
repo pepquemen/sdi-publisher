@@ -10,6 +10,7 @@ Persistence (encrypting the password via QgsAuthManager, saving several
 named connections) is handled by core.connection_store.ConnectionStore.
 """
 
+import os
 import threading
 from urllib.parse import quote
 from xml.sax.saxutils import escape
@@ -373,6 +374,80 @@ class GeoServerConnection:
             "PUT", path, published_name, table_name, titles, abstracts, keywords
         )
 
+    # ------------------------------------------------------- rasters
+    def list_coveragestores(self, workspace):
+        data = self._get_json(f"/rest/workspaces/{_seg(workspace)}/coveragestores.json")
+        stores = (data.get("coverageStores") or {}).get("coverageStore") or []
+        return [s["name"] for s in stores]
+
+    def list_coverages(self, workspace, store):
+        data = self._get_json(
+            f"/rest/workspaces/{_seg(workspace)}/coveragestores/{_seg(store)}/coverages.json")
+        covs = (data.get("coverages") or {}).get("coverage") or []
+        return [c["name"] for c in covs]
+
+    def get_coverage_detail(self, workspace, store, name):
+        r = self._request(
+            "GET",
+            f"/rest/workspaces/{_seg(workspace)}/coveragestores/{_seg(store)}"
+            f"/coverages/{_seg(name)}.json",
+        )
+        if r.status_code != 200:
+            return None
+        return (r.json() or {}).get("coverage")
+
+    def upload_geotiff(self, workspace, store, path, coverage_name, progress=None):
+        """
+        Upload a (COG) GeoTIFF: GeoServer stores the file in its data
+        directory and creates/updates the coverage store + layer in one call.
+        An existing store with the same name is overwritten.
+        """
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            body = _ProgressFile(f, size, progress)
+            r = self._request(
+                "PUT",
+                f"/rest/workspaces/{_seg(workspace)}/coveragestores/{_seg(store)}/file.geotiff",
+                params={"coverageName": coverage_name, "configure": "first",
+                        "update": "overwrite"},
+                data=body,
+                headers={"Content-Type": "image/tiff"},
+                timeout=(15, 3600),
+            )
+        if r.status_code in (200, 201):
+            return True, ""
+        if r.status_code == 413:
+            return False, (
+                "the server rejected the file because it is too large (HTTP 413). "
+                "Raise client_max_body_size in GeoNode's nginx, or copy big "
+                "rasters to the server with rsync.")
+        return False, self._http_error(r)
+
+    def update_coverage_metadata(self, workspace, store, name, titles=None,
+                                 abstracts=None, keywords=None):
+        """Titles/abstracts per language + keywords, recalculating bboxes."""
+        existing = self._keyword_list(self.get_coverage_detail(workspace, store, name))
+        merged, seen = [], set()
+        for kw in existing + list(keywords or []):
+            key = str(kw).split("\\@", 1)[0].strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(kw)
+        xml = (self._featuretype_xml(name, name, titles, abstracts, merged)
+               .replace("<featureType>", "<coverage>")
+               .replace("</featureType>", "</coverage>"))
+        r = self._request(
+            "PUT",
+            f"/rest/workspaces/{_seg(workspace)}/coveragestores/{_seg(store)}"
+            f"/coverages/{_seg(name)}",
+            params={"calculate": "nativebbox,latlonbbox"},
+            data=xml.encode("utf-8"),
+            headers={"Content-Type": "application/xml"},
+        )
+        if r.status_code in (200, 201):
+            return True, ""
+        return False, self._http_error(r)
+
     # ------------------------------------------------ synchronization
     def recalculate_bbox(self, workspace, datastore, layer_name):
         """Recompute native + lat/lon bounding boxes of a published layer."""
@@ -450,3 +525,20 @@ class GeoServerConnection:
             if t:
                 text = t.group(1).strip()
         return f"HTTP {response.status_code}: {text[:400]}"
+
+
+class _ProgressFile:
+    """File wrapper that reports upload progress (0-100) while requests reads it."""
+
+    def __init__(self, f, size, progress=None):
+        self._f, self._size, self._progress, self._read = f, size, progress, 0
+
+    def __len__(self):
+        return self._size
+
+    def read(self, n=-1):
+        chunk = self._f.read(n if n and n > 0 else 1024 * 1024)
+        self._read += len(chunk)
+        if self._progress and self._size:
+            self._progress(min(100.0, 100.0 * self._read / self._size))
+        return chunk

@@ -36,6 +36,7 @@ from .geoserver_panel import GeoServerPanel
 from .geonode_panel import GeoNodePanel
 from .sync_panel import SyncPanel
 from .inventory_panel import InventoryPanel
+from .raster_panel import RasterPanel
 from .about_panel import AboutPanel
 from .icons import themed_icon
 from .styles import STYLESHEET, SIDEBAR_STYLESHEET
@@ -84,6 +85,7 @@ class MainDialog(QDialog):
             ("GeoServer", "nav_geoserver.svg"),
             ("GeoNode", "nav_geonode.svg"),
             ("Sync", "nav_sync.svg"),
+            ("Rasters", "nav_raster.svg"),
             ("Inventory", "nav_inventory.svg"),
             ("About", "nav_about.svg"),
         ]
@@ -105,6 +107,7 @@ class MainDialog(QDialog):
         self.geoserver_panel = GeoServerPanel(self.iface, self)
         self.geonode_panel = GeoNodePanel(self.iface, self)
         self.sync_panel = SyncPanel(self.iface, self)
+        self.raster_panel = RasterPanel(self.iface, self)
         self.inventory_panel = InventoryPanel(self.iface, self)
         self.about_panel = AboutPanel(self.iface, self)
 
@@ -116,8 +119,9 @@ class MainDialog(QDialog):
         self.header_stack.addWidget(self.geoserver_panel.header_widget())    # 2
         self.header_stack.addWidget(self.geonode_panel.header_widget())      # 3
         self.header_stack.addWidget(self.sync_panel.header_widget())         # 4
-        self.header_stack.addWidget(self.inventory_panel.header_widget())    # 5
-        self.header_stack.addWidget(QWidget())                               # 6 (About, empty)
+        self.header_stack.addWidget(self.raster_panel.header_widget())       # 5
+        self.header_stack.addWidget(self.inventory_panel.header_widget())    # 6
+        self.header_stack.addWidget(QWidget())                               # 7 (About, empty)
         content_layout.addWidget(self.header_stack)
 
         self.header_sep = QFrame()
@@ -133,12 +137,14 @@ class MainDialog(QDialog):
         self.stack.addWidget(self.geoserver_panel)    # 2
         self.stack.addWidget(self.geonode_panel)      # 3
         self.stack.addWidget(self.sync_panel)         # 4
-        self.stack.addWidget(self.inventory_panel)    # 5
-        self.stack.addWidget(self.about_panel)        # 6
+        self.stack.addWidget(self.raster_panel)       # 5
+        self.stack.addWidget(self.inventory_panel)    # 6
+        self.stack.addWidget(self.about_panel)        # 7
         content_layout.addWidget(self.stack, stretch=1)
 
-        self._inventory_index = 5
-        self._about_index = 6
+        self._raster_index = 5
+        self._inventory_index = 6
+        self._about_index = 7
 
         main_layout.addWidget(content_widget)
 
@@ -162,6 +168,8 @@ class MainDialog(QDialog):
         self.header_sep.setVisible(show_header)
         if index == self._inventory_index:
             self.inventory_panel.on_shown()
+        elif index == self._raster_index:
+            self.raster_panel.reload_sources()
 
     def _on_service_connected(self, service, label, connection):
         """Dispatch a successful connection to the pages that need it."""
@@ -169,12 +177,14 @@ class MainDialog(QDialog):
             self.postgres_panel.set_connection(connection)
             self.geoserver_panel.set_pg_connection(connection)
             self.inventory_panel.set_pg_connection(connection)
+            self.raster_panel.set_pg_connection(connection)
             self.sidebar.setCurrentRow(1)
         elif service == GEOSERVER:
             self.geoserver_panel.set_connection(connection)
             self.geonode_panel.set_gs_connection(connection)
             self.sync_panel.set_gs_connection(connection)
             self.inventory_panel.set_gs_connection(connection)
+            self.raster_panel.set_gs_connection(connection)
             self.sidebar.setCurrentRow(2)
         elif service == GEONODE:
             self.geonode_panel.set_connection(connection)

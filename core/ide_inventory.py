@@ -295,8 +295,146 @@ def cross_check(pg_rows, gs_layers, gn_alternates, gs_workspaces=None, gs_all_na
 
 
 # ── Entry point ─────────────────────────────────────────────────────────
+# ── Rasters: original repository ↔ PostGIS catalog ↔ GeoServer ──────────
+RS_OK = "OK"
+RS_NOT_PUBLISHED = "Not published"
+RS_MODIFIED = "Original modified"
+RS_MISSING_ORIGINAL = "Original missing"
+RS_MISSING_GS = "Missing in GeoServer"
+RS_NOT_CATALOGUED = "Not catalogued"
+
+RS_STATUSES = [RS_MISSING_GS, RS_MISSING_ORIGINAL, RS_MODIFIED, RS_NOT_CATALOGUED,
+               RS_NOT_PUBLISHED, RS_OK]
+
+NOT_PUBLISHED_GROUP = "(not published)"
+
+
+def _norm_path(p):
+    import os
+    return os.path.normcase(os.path.normpath(os.path.abspath(str(p)))) if p else None
+
+
+def scan_repository(repo_dir, canceled=None):
+    """{normalized_path: {path, size, mtime}} of every GeoTIFF under repo_dir."""
+    import os
+    from .raster_tools import RASTER_EXTENSIONS
+    out = {}
+    if not repo_dir or not os.path.isdir(repo_dir):
+        return None
+    for root, _dirs, files in os.walk(repo_dir):
+        if canceled and canceled():
+            raise InventoryCanceled()
+        for fn in files:
+            if fn.lower().endswith(RASTER_EXTENSIONS) and not fn.startswith("."):
+                path = os.path.join(root, fn)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                out[_norm_path(path)] = {"path": path, "size": st.st_size, "mtime": st.st_mtime}
+    return out
+
+
+def read_geoserver_rasters(gs_conn, canceled=None):
+    """{(workspace, coverage): store} of every published coverage."""
+    out = {}
+    for ws in gs_conn.list_workspaces():
+        if canceled and canceled():
+            raise InventoryCanceled()
+        for store in gs_conn.list_coveragestores(ws):
+            for cov in gs_conn.list_coverages(ws, store):
+                out[(ws, cov)] = store
+    return out
+
+
+def build_raster_inventory(repo, catalog, gs_covs):
+    """
+    Merge the three sources. Any of them may be None (not read).
+    Returns one row per raster: {workspace, layer, store, title, source,
+    in_repo, in_catalog, in_geoserver, modified, version, published, status}.
+    """
+    from .raster_tools import sanitize_name
+    rows = {}
+
+    def row(ws, layer):
+        key = (ws, layer)
+        if key not in rows:
+            rows[key] = {"workspace": ws, "layer": layer, "store": None, "title": None,
+                         "source": None, "in_repo": None, "in_catalog": None,
+                         "in_geoserver": None, "modified": False, "version": None,
+                         "published": None, "user": None, "status": RS_OK}
+        return rows[key]
+
+    used_repo = set()
+    for c in catalog or []:
+        r = row(c["workspace"], c["layer"])
+        r.update(store=c["store"], title=c["title"], source=c["source"],
+                 version=c["version"], published=c["published"], user=c["user"],
+                 in_catalog=True)
+        if repo is not None:
+            key = _norm_path(c["source"])
+            f = repo.get(key) if key else None
+            if f is None:
+                # the original may live outside the repository folder
+                import os
+                if c["source"] and os.path.isfile(c["source"]):
+                    st = os.stat(c["source"])
+                    f = {"path": c["source"], "size": st.st_size, "mtime": st.st_mtime}
+            r["in_repo"] = f is not None
+            if f is not None:
+                used_repo.add(key)
+                r["modified"] = bool(
+                    (c["source_size"] is not None and f["size"] != c["source_size"])
+                    or (c["source_mtime"] is not None and f["mtime"] > c["source_mtime"] + 1))
+
+    if gs_covs is not None:
+        for (ws, cov), store in gs_covs.items():
+            r = row(ws, cov)
+            r["in_geoserver"] = True
+            r["store"] = r["store"] or store
+            if catalog is not None and not r["in_catalog"]:
+                r["in_catalog"] = False
+        for r in rows.values():
+            if r["in_geoserver"] is None:
+                r["in_geoserver"] = False
+
+    # Repository files not linked to any catalogued raster.
+    if repo is not None:
+        by_stem = {}
+        if catalog is None:   # no catalog: link to GeoServer by file name
+            for (ws, layer), r in rows.items():
+                by_stem.setdefault(layer, r)
+        for key, f in repo.items():
+            if key in used_repo:
+                continue
+            stem = sanitize_name(f["path"])
+            r = by_stem.get(stem)
+            if r is not None and r["source"] is None:
+                r["source"], r["in_repo"] = f["path"], True
+                continue
+            r = row(NOT_PUBLISHED_GROUP, stem + "  ·  " + key[-40:])
+            r.update(layer=stem, source=f["path"], in_repo=True,
+                     in_catalog=False if catalog is not None else None,
+                     in_geoserver=False if gs_covs is not None else None)
+
+    for r in rows.values():
+        if r["workspace"] == NOT_PUBLISHED_GROUP:
+            r["status"] = RS_NOT_PUBLISHED
+        elif r["in_geoserver"] is False:
+            r["status"] = RS_MISSING_GS
+        elif r["in_repo"] is False:
+            r["status"] = RS_MISSING_ORIGINAL
+        elif r["modified"]:
+            r["status"] = RS_MODIFIED
+        elif r["in_catalog"] is False:
+            r["status"] = RS_NOT_CATALOGUED
+        else:
+            r["status"] = RS_OK
+    return sorted(rows.values(), key=lambda r: (r["workspace"], r["layer"]))
+
+
 def build_ide_inventory(pg_conn=None, gs_conn=None, gn_conn=None,
-                        progress=None, canceled=None):
+                        progress=None, canceled=None, raster_cfg=None):
     progress = progress or (lambda p: None)
     canceled = canceled or (lambda: False)
     errors = []
@@ -334,6 +472,36 @@ def build_ide_inventory(pg_conn=None, gs_conn=None, gn_conn=None,
             errors.append(f"GeoNode: {e}")
 
     geonode_only = cross_check(pg_rows, gs_layers, gn_alts, gs_workspaces, gs_all)
+
+    # Rasters
+    rasters = None
+    if raster_cfg is not None:
+        repo = catalog = gs_covs = None
+        try:
+            repo = scan_repository(raster_cfg.repo_dir, canceled)
+        except InventoryCanceled:
+            raise
+        except Exception as e:
+            errors.append(f"Raster repository: {e}")
+        if pg_conn is not None and raster_cfg.catalog_schema:
+            try:
+                from .raster_catalog import read_current
+                catalog = read_current(pg_conn, raster_cfg.catalog_schema)
+            except Exception as e:
+                errors.append(f"Raster catalog: {e}")
+        if gs_conn is not None:
+            try:
+                gs_covs = read_geoserver_rasters(gs_conn, canceled)
+            except InventoryCanceled:
+                raise
+            except Exception as e:
+                errors.append(f"GeoServer rasters: {e}")
+        if any(x is not None for x in (repo, catalog, gs_covs)):
+            rasters = build_raster_inventory(repo, catalog, gs_covs)
+        rasters_sources = {"repo": repo is not None, "catalog": catalog is not None,
+                           "geoserver": gs_covs is not None}
+    else:
+        rasters_sources = {"repo": False, "catalog": False, "geoserver": False}
     progress(100)
 
     return {
@@ -342,6 +510,8 @@ def build_ide_inventory(pg_conn=None, gs_conn=None, gn_conn=None,
         "gs_workspaces": gs_workspaces,
         "geonode_only": geonode_only,
         "geonode_checked": gn_alts is not None,
+        "rasters": rasters,
+        "rasters_sources": rasters_sources,
         "errors": errors,
         "timestamp": datetime.now(),
     }
