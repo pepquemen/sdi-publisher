@@ -1,12 +1,19 @@
-# SDI Publisher (QGIS plugin)
+<p align="center">
+  <img src="assets/icons/wordmark.png" width="520" alt="SDI Publisher"/>
+</p>
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-![QGIS](https://img.shields.io/badge/QGIS-%E2%89%A5%203.16-589632)
-![Status](https://img.shields.io/badge/status-experimental-orange)
+<h1 align="center">SDI Publisher (QGIS plugin)</h1>
 
-Publish the vector layers of your QGIS project across a full spatial data
-infrastructure (SDI): upload to a PostgreSQL/PostGIS database, publish the
-resulting tables to GeoServer, and register them in GeoNode.
+<p align="center">
+  <a href="LICENSE"><img alt="License: GPL v3" src="https://img.shields.io/badge/License-GPLv3-blue.svg"></a>
+  <img alt="QGIS" src="https://img.shields.io/badge/QGIS-%E2%89%A5%203.16-589632">
+  <img alt="Status" src="https://img.shields.io/badge/status-experimental-orange">
+</p>
+
+Publish the layers of your QGIS project across a full spatial data
+infrastructure (SDI): upload vectors to a PostgreSQL/PostGIS database,
+publish the resulting tables and your rasters to GeoServer, register them
+in GeoNode, and keep an inventory of what is where.
 
 This plugin shares patterns — and the same UI design — with its sibling
 [style-reloader-qgis](https://github.com/pepquemen/style-reloader-qgis)
@@ -15,7 +22,7 @@ module).
 
 ## Current status
 
-Seven-tab window sharing the design system of `style-reloader-qgis`:
+Eight-tab window sharing the design system of `style-reloader-qgis`:
 
 - **Connection page** — three service blocks (Postgres / GeoServer /
   GeoNode). Each has a list of saved named connections, a **Manage…**
@@ -43,6 +50,28 @@ Seven-tab window sharing the design system of `style-reloader-qgis`:
 - **Sync page** — refreshes derived metadata (bbox, attributes, thumbnail)
   of already-published layers: immediate REST calls for GeoServer, a
   generated `sync_geonode_datasets` command for GeoNode.
+- **Rasters page** — publishes raster layers of the project, or GeoTIFF
+  files added by hand (e.g. from a NAS), to a chosen GeoServer workspace:
+  - optional conversion to **Cloud Optimized GeoTIFF** with GDAL
+    (DEFLATE / LZW / ZSTD / JPEG, internal overviews, predictor chosen from
+    the data type); unchecked, the original GeoTIFF is uploaded as is;
+  - upload through GeoServer's REST API (`coveragestores/…/file.geotiff`):
+    the file is stored in GeoServer's data directory and the store + layer
+    are created in one call — no SSH access to the server needed. Publishing
+    a raster that already exists replaces it, after confirmation;
+  - title/abstract per configured language and keywords (default: the
+    workspace name);
+  - optional **PostGIS catalog** in the schema you choose
+    (`<schema>.cataleg_rasters`, created on first use): footprint polygon
+    with a GIST index, original file path/size/date, CRS, resolution,
+    size, bands, data type, nodata, min/max, compression, titles, keywords,
+    user and date. Every republication adds a new version; only the latest
+    is flagged `actual`. Pixels are never stored in the database;
+  - runs as a background `QgsTask` with progress and Cancel.
+
+  Large files go through GeoNode's nginx, so `client_max_body_size` may need
+  raising; for multi-GB rasters copy them to the server (e.g. `rsync` from
+  the NAS) instead.
 - **Inventory page** — read-only overview of the whole SDI. *Postgres by
   schema* lists every spatial table (from `geometry_columns`), named by its
   `COMMENT ON TABLE` (or the table code when it has none), with approximate
@@ -51,8 +80,12 @@ Seven-tab window sharing the design system of `style-reloader-qgis`:
   lists every vector layer with its source table and flags *Orphan* (the
   table no longer exists), *Only in GeoNode*, *Not in GeoNode*, *Disabled*,
   *SQL view* and *External source* (non-PostGIS store or another database).
-  Search, status filter chips, CSV export; reading runs in a background
-  `QgsTask`.
+  *Rasters* compares the original repository folder (local disk or NAS),
+  the PostGIS raster catalog and GeoServer's coverage stores, and flags
+  *Not published*, *Original modified* (the file changed after it was
+  published), *Original missing*, *Missing in GeoServer* and *Not
+  catalogued*. Search, status filter chips, CSV export; reading runs in a
+  background `QgsTask`.
 - **About page** — plugin info, authors and links.
 
 ## Requirements
@@ -92,7 +125,9 @@ sdi_publisher/
 │   ├── upload_config.py
 │   ├── uploader.py                # GDAL VectorTranslate upload (+ native fallback)
 │   ├── layer_inventory.py         # shared GeoServer/GeoNode layer listing
-│   ├── ide_inventory.py           # Postgres ↔ GeoServer ↔ GeoNode cross-check (Inventory)
+│   ├── ide_inventory.py           # Postgres ↔ GeoServer ↔ GeoNode (+ rasters) cross-check
+│   ├── raster_tools.py            # COG conversion, raster inspection, Rasters page settings
+│   ├── raster_catalog.py          # PostGIS raster catalog (cataleg_rasters)
 │   ├── command_builder.py         # updatelayers command generator
 │   ├── sync_command_builder.py    # sync_geonode_datasets command generator
 │   ├── language_config.py         # user-configurable metadata languages
@@ -108,6 +143,7 @@ sdi_publisher/
 │   ├── geoserver_panel.py
 │   ├── geonode_panel.py
 │   ├── sync_panel.py
+│   ├── raster_panel.py
 │   ├── inventory_panel.py
 │   ├── about_panel.py
 │   ├── config_dialog.py
@@ -167,6 +203,10 @@ git archive --format=zip --prefix=sdi_publisher/ -o sdi_publisher.zip HEAD
 - [x] GeoNode `updatelayers` command generator
 - [x] Sync tab for bbox/attributes/thumbnail refresh
 - [x] Inventory tab (Postgres ↔ GeoServer ↔ GeoNode cross-check)
+- [x] Rasters tab: COG conversion, GeoServer upload, PostGIS catalog,
+      raster inventory (repository ↔ catalog ↔ GeoServer)
+- [ ] Publish the QGIS raster style to GeoServer (meanwhile, use
+      [Style Reloader](https://github.com/pepquemen/style-reloader-qgis) ≥ 0.1.3)
 - [ ] Move uploads/publishing to a background `QgsTask` so the UI never
       blocks on very large layers
 
